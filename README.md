@@ -1,141 +1,286 @@
-# Forklift and Pallet Detection (YOLO11)
+# Forklift and Pallet Detection
 
-Detect **forklifts** and **pallets** in warehouse images and video. For every object the model returns a class, a bounding box and a confidence score.
+**Real-time object detection for warehouse safety, automation and inventory, built on YOLO11 and served with FastAPI.**
 
-Built as a take-home task for an AI Engineer role. The focus is the part that decides accuracy in real projects: **data quality, honest evaluation and clear limits**, not only the model.
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Ultralytics](https://img.shields.io/badge/Model-YOLO11s-00A3E0)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)
+![ONNX](https://img.shields.io/badge/Export-ONNX-005CED)
+![mAP50](https://img.shields.io/badge/test%20mAP%4050-0.863-brightgreen)
 
-<!-- Add one or two result images here, for example assets/predictions.png (from notebook section 7) -->
+<!-- Add screenshots: assets/demo.png (web demo) and assets/predictions.png (sample predictions) -->
 
-## Why this matters
+## Table of contents
 
-| Use case | How a detector helps |
+1. [Overview](#overview)
+2. [Key results](#key-results)
+3. [Features](#features)
+4. [Architecture](#architecture)
+5. [Quick start](#quick-start)
+6. [API reference](#api-reference)
+7. [Data](#data)
+8. [Model and training](#model-and-training)
+9. [Evaluation](#evaluation)
+10. [Performance](#performance)
+11. [Project structure](#project-structure)
+12. [Reproducing the training](#reproducing-the-training)
+13. [Limitations](#limitations)
+14. [Roadmap](#roadmap)
+15. [Tech stack, licenses and credits](#tech-stack-licenses-and-credits)
+
+## Overview
+
+The system detects **forklifts** and **pallets** (empty or loaded) in warehouse images and returns, for every object, a class, a bounding box and a confidence score.
+
+| Use case | What the detector enables |
 | --- | --- |
 | Safety | Warn when a forklift enters a walking zone |
 | Automation | Guide autonomous forklifts to the right pallet |
 | Inventory | Count pallets without manual stock checks |
 | Efficiency | Measure forklift use and dock activity |
 
-The task is **object detection** (what is where), not classification (one label per image) and not segmentation (pixel masks): boxes are enough for counting, zones and tracking, and they are far cheaper to label.
+The problem is framed as **object detection** (what is where) rather than classification or segmentation: boxes are enough for counting, zones and tracking, and they are far cheaper to label.
 
-## Results
+The project covers the full path from raw public datasets to a working service: data auditing and filtering, leakage-aware splits, class-imbalance handling, model comparison, honest evaluation, ONNX export and a live demo.
 
-Held-out test set, 187 images. The model was chosen on validation, and the test set was used once.
+## Key results
 
-| Model | Split | mAP@50 | mAP@50-95 | Precision | Recall |
-| --- | --- | --- | --- | --- | --- |
-| YOLO11n | val | 0.851 | 0.468 | 0.911 | 0.769 |
-| YOLO11n | test | 0.883 | 0.531 | 0.863 | 0.799 |
-| YOLO11s | val | 0.858 | 0.474 | 0.881 | 0.817 |
-| YOLO11s | test | 0.856 | 0.512 | 0.822 | 0.812 |
+Held-out test set (187 images). The model and every threshold were chosen on validation; the test set was used once.
 
-Per class, test AP@50 (YOLO11s): forklift 0.868, pallet 0.844.
-ONNX on CPU: 134 ms per image (7.5 FPS), mAP@50-95 0.501 against 0.512 in PyTorch.
+| Metric | Value |
+| --- | --- |
+| Model | YOLO11s, COCO-pretrained, 768 px |
+| mAP@50 / mAP@50-95 | **0.863 / 0.540** |
+| Precision / Recall | 0.826 / 0.793 |
+| Forklift AP@50 / mAP@50-95 | 0.902 / 0.631 |
+| Pallet AP@50 / mAP@50-95 | 0.823 / 0.450 |
+| Forklift/pallet confusions | 0 |
+| CPU latency (ONNX, batch 1) | 210 ms per image (4.8 FPS) |
 
-<!-- UPDATE: these numbers come from the first training run (640 px, 60 epochs, no class balancing). Replace them with the output of the final run of the notebook. -->
+## Features
 
-The two sizes are within noise of each other on a test set this small (about 100 forklift boxes), so YOLO11n is the better value for speed.
+- **Detector:** YOLO11s fine-tuned for two classes, exported to ONNX.
+- **Web demo:** drag-and-drop upload of one or many images, model selector (`.pt` or `.onnx`), confidence slider with live preview, per-class counts and inference time, light and dark theme.
+- **REST API:** FastAPI endpoints for prediction, model listing, history and health, with interactive docs at `/docs`.
+- **Audit trail:** every saved run writes an annotated image, a JSON file with all detections, a CSV log and an HTML report.
+- **Reproducible pipeline:** data preparation, training, evaluation and export in one notebook, with a fixed seed.
 
-**Error analysis** (YOLO11s, test, confidence 0.25, IoU 0.5): 1,020 correct detections, 349 false alarms, 198 missed objects, and no forklift/pallet confusion. Missed objects are small (median area 0.16% of the image against 0.42% for all boxes). Many false alarms are probably real pallets that were never labeled, which is the main weakness of the data (see below).
-
-## Approach
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[Two source datasets] --> B[Filter to forklift and pallet<br/>validate and audit labels]
-    B --> C[Carve test split<br/>remove near-duplicates]
-    C --> D[Fix imbalance and<br/>missing labels]
+    A[Two public datasets] --> B[Filter to forklift and pallet<br/>validate and audit labels]
+    B --> C[Train / valid / test split<br/>near-duplicate check]
+    C --> D[Imbalance handling]
     D --> E[Train YOLO11n and YOLO11s]
-    E --> F[Evaluate on validation,<br/>test once]
-    F --> G[Error analysis<br/>ONNX export and speed]
+    E --> F[Select on validation,<br/>test once]
+    F --> G[ONNX export]
+    G --> H[FastAPI service]
+    H --> I[Browser UI and results/ folder]
 ```
 
-### Data
+## Quick start
+
+Requirements: Python 3.10 or newer. No GPU is needed for the demo.
+
+```bash
+git clone <repository-url>
+cd <repository-folder>
+
+python -m venv venv
+venv\Scripts\activate          # macOS/Linux: source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Place the trained weights in `models/` as `best.pt` and/or `best.onnx` (exported by the notebook as `yolo11s_best.pt` and `yolo11s_best.onnx`). Then start the server:
+
+```bash
+uvicorn app:app --reload
+```
+
+Open http://127.0.0.1:8000 for the UI or http://127.0.0.1:8000/docs for the API documentation.
+
+### Using the demo
+
+1. Drop one or more images on the page. New uploads are processed and saved automatically.
+2. Pick a model and move the confidence slider to preview other thresholds (previews are not saved).
+3. Press **Run & save to results** to store the current setting.
+4. Open the full report from the **Recent results** panel.
+
+Saved runs are written to `results/`:
+
+```
+results/
+├── summary.csv                      # one row per saved image
+├── report.html                      # totals and thumbnails
+└── <timestamp>_<image>/
+    ├── original.jpg
+    ├── annotated.jpg
+    └── detections.json              # label, confidence and box for every detection
+```
+
+## API reference
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/` | Web UI |
+| GET | `/health` | Status, available models, default model, image size, device |
+| GET | `/models` | Available model files and the default |
+| GET | `/history?limit=8` | Most recent saved runs |
+| POST | `/predict` | Detect objects in one image |
+| GET | `/docs` | Interactive OpenAPI documentation |
+
+`POST /predict` takes a multipart form: `file` (image), `conf` (default `0.35`), `model` (file name from `/models`) and `save` (default `false`).
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -F "file=@warehouse.jpg" -F "conf=0.35" -F "model=best.onnx" -F "save=false"
+```
+
+```json
+{
+  "width": 1280, "height": 720, "ms": 210.4, "model": "best.onnx",
+  "detections": [
+    {"label": "forklift", "conf": 0.9, "box": [152.0, 71.3, 255.8, 266.0]}
+  ],
+  "saved": null
+}
+```
+
+Boxes are `[x1, y1, x2, y2]` in original image pixels. Inference uses 768 px input and an NMS IoU of 0.7, the values tuned on validation.
+
+## Data
 
 | Source | Images | Classes | Notes |
 | --- | --- | --- | --- |
 | Warehouse dataset (Roboflow Universe) | 1,075 | forklift, pallet, pallet_truck, small_load_carrier, stillage | 11,776 pallet boxes but only 5 forklift boxes in train |
 | Forklift dataset (Kaggle) | 1,011 | forklift, person | 1,000 forklift boxes in train, no pallets |
 
-After merging, filtering and near-duplicate removal: **1,660 train / 213 validation / 187 test** images.
+Final dataset: **1,660 train / 213 validation / 187 test** images.
 
-Filtering rules (the original datasets are never modified):
+| Split | Images | Forklift boxes | Pallet boxes |
+| --- | --- | --- | --- |
+| train | 1,660 | 905 | 10,347 |
+| validation | 213 | 96 | 1,480 |
+| test | 187 | 100 | 1,118 |
 
-- Keep only `forklift` (id 0) and `pallet` (id 1). Names are matched exactly, so `pallet_truck` is never mistaken for `pallet`.
-- Boxes of the removed classes are deleted, so those objects become background. The model learns that they are not forklifts or pallets.
-- Images with only removed classes are hard negatives. Only a capped sample is kept (80 images), because a pallet under a stillage may be unlabeled in the source.
-- Images with empty or missing labels, or unreadable files, are dropped.
-- Polygons are converted to YOLO boxes, and the output is verified from disk (image/label pairs, class ids, box ranges, counts, `data.yaml`).
-- Audit sheets (`audit_negatives.png`, `audit_overlaps.png`) and CSV reports are written for a visual review.
+About 70% of all boxes cover less than 1% of the image, so small objects dominate.
 
-### Split hygiene
+**Filtering rules** (the source datasets are never modified):
 
-The sources have no usable test split, so one is carved from the pooled train data. Near-identical frames are grouped with a difference hash and stay together, and near-duplicates are then removed between train and validation or test (21 from train, 2 from validation). Without this, a test twin of a training image makes the score look better than it is.
+- Only `forklift` and `pallet` are kept. Class names are matched exactly, so `pallet_truck` is never mistaken for `pallet`.
+- Boxes of removed classes (11,836 in total) become background, so the model learns they are neither forklifts nor pallets.
+- Images with only removed classes are kept as hard negatives, capped at 80 images.
+- Images with empty or missing labels, or unreadable files, are dropped (3 images).
+- Polygons are converted to YOLO boxes, and the finished dataset is re-read from disk and verified.
+- Audit sheets and CSV reports are produced for visual review.
 
-### Two data problems and the fixes
+**Split hygiene.** Near-identical frames are grouped with a difference hash so they stay together, and a near-duplicate check runs across the splits (none needed removal in the final run). This prevents a test twin of a training image from inflating the score.
 
-| Problem | Evidence | Fix |
+**Data problems and how they are handled**
+
+| Problem | Evidence | Handling |
 | --- | --- | --- |
-| Class imbalance | about 11 pallet boxes per forklift box in train (10,347 and 905) | Repeat forklift images up to 3 times, evaluate each class separately |
-| Labels missing across sources | The forklift dataset has no pallet labels, the warehouse dataset has 5 forklift labels | Self-training: a first model adds confident (0.6 or more) labels to the train split only, and a sample is checked by eye |
+| Class imbalance | About 12 pallet boxes per forklift box (13,275 and 1,101) | Forklift images repeated up to 3 times (3,324 train images, 2,715 forklift boxes), class-weighted loss (power 0.5), per-class evaluation |
+| Labels missing across sources | The forklift dataset has no pallet labels, the warehouse dataset has 5 forklift labels | Errors reported per source. Pseudo-labelling is implemented in the notebook but switched off in the final run |
 
-Validation and test labels are never changed.
+Validation and test labels are never modified.
 
-### Model and training
+## Model and training
 
-- **Model:** Ultralytics YOLO11n and YOLO11s, fine-tuned from COCO weights (transfer learning). YOLO11 is a single-stage, anchor-free detector, which gives real-time speed and a simple ONNX export.
-- **Settings:** 768 px images, up to 80 epochs, early stopping, cosine learning rate, mosaic off for the last 10 epochs, no vertical flip, fixed seed.
-- **Selection:** the model and the confidence threshold are chosen on validation. The test set is used once.
+- **Architecture:** Ultralytics YOLO11, a single-stage anchor-free detector, fine-tuned from COCO weights. YOLO11n is the lightweight baseline and YOLO11s is compared against it.
+- **Settings:** 768 px, up to 60 epochs with early stopping (patience 20), cosine learning rate, mosaic off for the last 10 epochs, no vertical flip, class-weighted loss, seed 42.
+- **Hardware:** Tesla T4. Training took 39 minutes (YOLO11n) and 58 minutes (YOLO11s).
+- **Selection protocol:** the model, the NMS IoU (0.5 to 0.8 tried, 0.7 best) and the confidence threshold (0.35, best F1) are chosen on validation only.
+- **Test-time augmentation** raised validation mAP@50-95 from 0.491 to 0.507 but more than doubled inference time, so it is not used.
+- An `accurate` preset (960 px, 100 epochs) is available in the notebook for small-object accuracy.
 
-### Evaluation
+## Evaluation
 
-Precision, recall, mAP@50 and mAP@50-95, reported per class. The notebook also builds a confusion matrix at the chosen confidence threshold (the one Ultralytics draws uses a very low threshold and is flooded with background false alarms), a per-source table, and images of the worst predictions.
+| Model | Split | mAP@50 | mAP@50-95 | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| YOLO11n | val | 0.830 | 0.476 | 0.855 | 0.773 |
+| YOLO11n | test | 0.875 | 0.548 | 0.869 | 0.806 |
+| **YOLO11s** | val | 0.838 | 0.491 | 0.867 | 0.778 |
+| **YOLO11s** | test | 0.863 | 0.540 | 0.826 | 0.793 |
 
-## Repository
+YOLO11s is selected because it has the higher validation mAP@50-95. On the test set the two sizes are close, which is expected for a set with about 100 forklift boxes.
+
+**Error analysis** (YOLO11s, test, confidence 0.35, IoU 0.5):
+
+| Outcome | Count |
+| --- | --- |
+| Correct detections | 943 |
+| False alarms on background | 273 |
+| Missed objects | 275 |
+| Forklift/pallet confusions | 0 |
+
+At this operating point precision is 0.775, recall 0.774 and F1 0.775. Recall depends on object size: small pallets (under 0.2% of the image) are found 62.5% of the time, medium ones 83.3% and large ones 86.9%. Missed objects have a median area of 0.19% of the image, against 0.42% for all boxes. Some false alarms are probably real pallets that were never labeled in the source data.
+
+## Performance
+
+Measured on an Intel Xeon 2.0 GHz CPU, batch 1, 768 px.
+
+| Runtime | Latency | FPS | Test mAP@50-95 |
+| --- | --- | --- | --- |
+| PyTorch | 254 ms | 3.9 | 0.540 |
+| ONNX Runtime | 210 ms | 4.8 | 0.532 |
+
+On a Tesla T4 inference takes about 13 ms per image. Latency depends on the hardware, and a laptop CPU is slower than the server CPU above.
+
+## Project structure
 
 ```
 .
-├── forklift_pallet_detection.ipynb   # full pipeline: data, training, evaluation, export
-├── prepare_two_class_dataset.py      # standalone version of the data preparation step
+├── app.py                            # FastAPI backend
+├── static/index.html                 # demo UI (HTML, CSS, JS)
+├── models/                           # best.pt and/or best.onnx
+├── results/                          # saved runs (generated, not tracked)
+├── forklift_pallet_detection.ipynb   # data, training, evaluation, export
+├── test/images of test demo
 ├── assets/                           # figures used in this README
+├── requirements.txt
 └── README.md
 ```
 
-## How to run
+## Reproducing the training
 
-The notebook is written for **Kaggle**.
+The notebook targets **Kaggle**.
 
-1. Create a Kaggle notebook and turn on a **GPU** accelerator and **Internet**.
-2. Add the two datasets with **Add data** (the Roboflow warehouse dataset and the forklift dataset, YOLOv8 format).
-3. Upload `forklift_pallet_detection.ipynb` and run all cells. Settings (image size, epochs, oversampling, pseudo-labels) are in the Config cell.
-4. Outputs go to `/kaggle/working`: the processed dataset, `runs/` with weights and plots, the ONNX model, and `results.csv`.
+1. Create a Kaggle notebook with a **GPU** accelerator and **Internet** enabled.
+2. Add the two datasets with **Add data** (YOLOv8 format).
+3. Upload `forklift_pallet_detection.ipynb` and run all cells. Image size, epochs, oversampling and pseudo-label options are in the Config cell.
+4. Outputs are written to `/kaggle/working`: the processed dataset, `runs/` with weights and plots, the ONNX model and `results.csv`.
 
-Locally, install `ultralytics onnx onnxslim onnxruntime` and set the dataset paths in the data preparation step.
+Locally, install `ultralytics onnx onnxslim onnxruntime` and set the dataset paths in the data preparation step. Training used Ultralytics 8.4.182, PyTorch 2.11.0 and ONNX Runtime 1.31.0.
 
 ## Limitations
 
-- **Domain shift:** public images differ from a real warehouse in angle, lighting and pallet types. The scores are not a production guarantee. Next step: label a few hundred real frames and fine-tune.
-- **Carved test split:** it comes from the training data. Near-duplicates are removed, but frames from the same site still share lighting and layout, so the numbers are optimistic for a new site.
-- **Partial labels:** each source labels mostly one class. Pseudo-labels are model guesses, so a person should review a sample. Validation and test are not corrected, so false alarms on unlabeled objects still count against the model there.
-- **Source shortcut:** because each class comes mostly from one dataset, the model may use the look of a source as a cue. The notebook measures results per source, but a mixed-scene test set labeled by hand would settle it.
+- **Domain shift:** public images differ from a real warehouse in angle, lighting and pallet types, so the scores are not a production guarantee.
+- **Small test set:** frames from the same site share lighting and layout, so results are optimistic for a new site, and per-class scores can move by several points.
+- **Small and hidden pallets** are the weakest case (62.5% found when small).
+- **Partial labels:** each source labels mostly one class, so some real objects count as background. Validation and test labels are not corrected.
+- **Source shortcut:** because each class comes mostly from one dataset, the model may use the look of a source as a cue. Results are measured per source, but a hand-labeled mixed-scene test set would settle it.
 - **Similar equipment:** pallet trucks, stillages and small load carriers are treated as background and can still be confused with the target classes.
 - **2D boxes only:** no distance or approach angle. Autonomous use needs a depth camera or LiDAR as well.
-- **Small dataset:** per-class scores can swing by several points.
+- **CPU speed:** about 210 ms per image with ONNX on a server CPU. Real-time video needs a GPU or an optimized runtime.
 
-## Next steps
+## Roadmap
 
-1. Label real frames from the target cameras and review the pseudo-labels.
+1. Label real frames from the target cameras, fine-tune and review pseudo-labels.
 2. Active learning on low-confidence frames.
-3. Validate on representative warehouse data before any deployment.
-4. Optimize for the target hardware (for example INT8 quantization), then wrap the model in an inference service (for example FastAPI).
-5. Tracking (ByteTrack) and zone rules on top of the detector.
+3. Validate on representative warehouse data before deployment.
+4. Optimize for the target hardware (for example OpenVINO or INT8 quantization).
+5. Add tracking (ByteTrack) and zone rules for video.
 
-## Credits and licenses
+## Tech stack, licenses and credits
 
-- Warehouse dataset (Roboflow Universe): []
-- Forklift dataset (Kaggle): []
-- [Ultralytics YOLO11](https://github.com/ultralytics/ultralytics) is licensed under AGPL-3.0, so commercial use needs a license review.
-- Check each dataset license before reuse.
+**Stack:** Python, Ultralytics YOLO11, PyTorch, ONNX Runtime, FastAPI, Uvicorn, Pillow, vanilla HTML, CSS and JavaScript.
+
+**Data:** Roboflow Universe warehouse dataset and Kaggle forklift dataset. Check each dataset license before reuse.
+
+**License note:** [Ultralytics](https://github.com/ultralytics/ultralytics) is released under AGPL-3.0, so commercial use requires a license review.
 
 ## Author
 
-Rana Nasser, Computer Science, Ain Shams University.
+**Rana Nasser**, Computer Science, Ain Shams University. Developed for the Petrochoice AI Engineer assessment (Round 2).
